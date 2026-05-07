@@ -332,56 +332,62 @@ resource "aws_instance" "api_server" {
     }
   }
 
-  # Bootstrap script: installs Docker and runs a health-check endpoint
-  # to confirm the infrastructure is working before we deploy the real app.
+  # ==========================================================================
+  # Boot script — runs once on first launch.
+  # Installs Docker, installs Git, clones the public GitHub repo, builds
+  # the multi-stage Docker image, and runs the Flask API container on port 5000.
+  # The entire application stack is self-bootstrapping — no manual SSH needed.
+  # ==========================================================================
   user_data = base64encode(<<-EOF
     #!/bin/bash
     set -e
     exec > >(tee /var/log/user-data.log | logger -t user-data) 2>&1
 
-    echo "[user-data] Starting bootstrap..."
+    echo "[user-data] ========================================"
+    echo "[user-data] Phase 2 — Flask API auto-deploy"
+    echo "[user-data] ========================================"
 
-    # System updates
+    # --- System packages ---
     dnf update -y
 
-    # Install Docker
     echo "[user-data] Installing Docker..."
-    dnf install -y docker
+    dnf install -y docker git
     systemctl enable docker
     systemctl start docker
     usermod -a -G docker ec2-user
 
-    # Install Python 3 (already present on AL2023, but ensure pip)
-    echo "[user-data] Ensuring Python is available..."
-    dnf install -y python3 python3-pip
+    # --- Clone the repository ---
+    REPO_URL="https://github.com/AruHonshou/devops-terraform-project.git"
+    APP_DIR="/home/ec2-user/app"
 
-    # Simple health endpoint on port 5000 to prove infrastructure works
-    echo "[user-data] Starting health endpoint on port ${var.app_port}..."
-    cat << 'PYEOF' > /home/ec2-user/health.py
-    from http.server import HTTPServer, BaseHTTPRequestHandler
-    import json, socket
+    if [ -d "$APP_DIR/.git" ]; then
+      echo "[user-data] Repo exists — pulling latest..."
+      cd "$APP_DIR" && git pull origin main
+    else
+      echo "[user-data] Cloning repository..."
+      git clone "$REPO_URL" "$APP_DIR"
+    fi
 
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            if self.path == "/health":
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({
-                    "status": "healthy",
-                    "hostname": socket.gethostname(),
-                    "phase": "infrastructure-ready"
-                }).encode())
-            else:
-                self.send_response(404)
-                self.end_headers()
+    # --- Build multi-stage Docker image ---
+    echo "[user-data] Building Docker image..."
+    cd "$APP_DIR/app"
+    docker build -t devops-terraform-api:latest .
 
-    HTTPServer(("0.0.0.0", ${var.app_port}), Handler).serve_forever()
-    PYEOF
+    # --- Run the container ---
+    # Stop and remove any old container running on the same port
+    docker stop flask-api 2>/dev/null || true
+    docker rm flask-api 2>/dev/null || true
 
-    python3 /home/ec2-user/health.py &
+    echo "[user-data] Starting container..."
+    docker run -d \
+      --name flask-api \
+      --restart always \
+      -p ${var.app_port}:${var.app_port} \
+      devops-terraform-api:latest
 
-    echo "[user-data] Bootstrap complete."
+    echo "[user-data] ========================================"
+    echo "[user-data] Flask API deployed on port ${var.app_port}"
+    echo "[user-data] ========================================"
   EOF
   )
 
@@ -393,6 +399,56 @@ resource "aws_instance" "api_server" {
   # the resource as created (best effort)
   lifecycle {
     create_before_destroy = true
+  }
+}
+
+# =========================================================================== #
+# APPLICATION DEPLOYMENT (null_resource)
+# =========================================================================== #
+# Deploys the Flask Docker app onto the running EC2 instance via SSH.
+# Using a null_resource avoids recreating the entire EC2 instance when only
+# the application code changes. The user_data above serves as documentation
+# of what a fresh boot would do.
+# =========================================================================== #
+resource "null_resource" "deploy_app" {
+  # Trigger redeployment whenever the app.py or Dockerfile changes
+  triggers = {
+    app_py_hash    = filesha256("${path.module}/../app/app.py")
+    dockerfile_hash = filesha256("${path.module}/../app/Dockerfile")
+  }
+
+  connection {
+    type        = "ssh"
+    user        = "ec2-user"
+    private_key = tls_private_key.ssh_key.private_key_pem
+    host        = aws_eip.api_eip.public_ip
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      # Clean up any leftover files from earlier manual deploys
+      "sudo pkill -f health.py 2>/dev/null || true",
+      "sudo rm -rf /home/ec2-user/app 2>/dev/null || true",
+
+      # Install git if missing
+      "sudo dnf install -y git 2>/dev/null || true",
+
+      # Clone the repo fresh each time (idempotent via triggers)
+      "git clone https://github.com/AruHonshou/devops-terraform-project.git /home/ec2-user/app",
+
+      # Build the multi-stage Docker image
+      "cd /home/ec2-user/app/app && docker build -t devops-terraform-api:latest .",
+
+      # Replace the running container
+      "docker stop flask-api 2>/dev/null || true",
+      "docker rm flask-api 2>/dev/null || true",
+      "docker run -d --name flask-api --restart always -p ${var.app_port}:${var.app_port} devops-terraform-api:latest",
+
+      # Verify
+      "sleep 3",
+      "docker ps --filter name=flask-api --format '{{.Status}}'",
+      "curl -s http://localhost:${var.app_port}/health",
+    ]
   }
 }
 
@@ -411,3 +467,4 @@ resource "aws_eip" "api_eip" {
     Name = "${var.project_name}-eip"
   }
 }
+
