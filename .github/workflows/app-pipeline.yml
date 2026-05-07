@@ -28,8 +28,6 @@ on:
 
 env:
   IMAGE_NAME: devops-terraform-api
-  # Docker Hub username is stored as a secret — never hardcoded
-  DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
 
 jobs:
   test-build-deploy:
@@ -99,10 +97,8 @@ jobs:
           file: app/Dockerfile
           push: true
           tags: |
-            ${{ env.DOCKERHUB_USER }}/${{ env.IMAGE_NAME }}:latest
-            ${{ env.DOCKERHUB_USER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          cache-from: type=registry,ref=${{ env.DOCKERHUB_USER }}/${{ env.IMAGE_NAME }}:buildcache
-          cache-to: type=registry,ref=${{ env.DOCKERHUB_USER }}/${{ env.IMAGE_NAME }}:buildcache,mode=max
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
 
       # =======================================================================
       # Step 7 — Deploy to EC2
