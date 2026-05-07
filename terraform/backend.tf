@@ -19,10 +19,6 @@ terraform {
       source  = "hashicorp/tls"
       version = "~> 4.0"
     }
-    null = {
-      source  = "hashicorp/null"
-      version = "~> 3.0"
-    }
   }
 
   # Remote state stored in S3 — if we lose our laptop, we don't lose the state.

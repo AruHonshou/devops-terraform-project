@@ -403,57 +403,6 @@ resource "aws_instance" "api_server" {
 }
 
 # =========================================================================== #
-# APPLICATION DEPLOYMENT (null_resource)
-# =========================================================================== #
-# Deploys the Flask Docker app onto the running EC2 instance via SSH.
-# Using a null_resource avoids recreating the entire EC2 instance when only
-# the application code changes. The user_data above serves as documentation
-# of what a fresh boot would do.
-# CI/CD: GitHub Actions triggers this on push to main. SSH opened for CI runners.
-# =========================================================================== #
-resource "null_resource" "deploy_app" {
-  # Trigger redeployment whenever the app.py or Dockerfile changes
-  triggers = {
-    app_py_hash     = filesha256("${path.module}/../app/app.py")
-    dockerfile_hash = filesha256("${path.module}/../app/Dockerfile")
-  }
-
-  connection {
-    type        = "ssh"
-    user        = "ec2-user"
-    private_key = tls_private_key.ssh_key.private_key_pem
-    host        = aws_eip.api_eip.public_ip
-  }
-
-  provisioner "remote-exec" {
-    inline = [
-      # Clean up any leftover files from earlier manual deploys
-      "sudo pkill -f health.py 2>/dev/null || true",
-      "sudo rm -rf /home/ec2-user/app 2>/dev/null || true",
-
-      # Install git if missing
-      "sudo dnf install -y git 2>/dev/null || true",
-
-      # Clone the repo fresh each time (idempotent via triggers)
-      "git clone https://github.com/AruHonshou/devops-terraform-project.git /home/ec2-user/app",
-
-      # Build the multi-stage Docker image
-      "cd /home/ec2-user/app/app && docker build -t devops-terraform-api:latest .",
-
-      # Replace the running container
-      "docker stop flask-api 2>/dev/null || true",
-      "docker rm flask-api 2>/dev/null || true",
-      "docker run -d --name flask-api --restart always -p ${var.app_port}:${var.app_port} devops-terraform-api:latest",
-
-      # Verify
-      "sleep 3",
-      "docker ps --filter name=flask-api --format '{{.Status}}'",
-      "curl -s http://localhost:${var.app_port}/health",
-    ]
-  }
-}
-
-# =========================================================================== #
 # ELASTIC IP
 # =========================================================================== #
 # A static public IP that survives instance reboots and stop/start cycles.
