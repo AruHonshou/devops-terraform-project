@@ -37,6 +37,7 @@ def root():
     return jsonify({
         "message": "Automated API Infrastructure",
         "version": "1.0.0",
+        "ci_cd": "GitHub Actions",
     })
 
 

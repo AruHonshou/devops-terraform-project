@@ -409,6 +409,7 @@ resource "aws_instance" "api_server" {
 # Using a null_resource avoids recreating the entire EC2 instance when only
 # the application code changes. The user_data above serves as documentation
 # of what a fresh boot would do.
+# CI/CD: GitHub Actions triggers this on push to main.
 # =========================================================================== #
 resource "null_resource" "deploy_app" {
   # Trigger redeployment whenever the app.py or Dockerfile changes
