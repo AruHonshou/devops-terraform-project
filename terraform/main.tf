@@ -414,7 +414,7 @@ resource "aws_instance" "api_server" {
 resource "null_resource" "deploy_app" {
   # Trigger redeployment whenever the app.py or Dockerfile changes
   triggers = {
-    app_py_hash    = filesha256("${path.module}/../app/app.py")
+    app_py_hash     = filesha256("${path.module}/../app/app.py")
     dockerfile_hash = filesha256("${path.module}/../app/Dockerfile")
   }
 
