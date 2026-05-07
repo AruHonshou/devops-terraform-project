@@ -78,6 +78,7 @@ def info():
 # Gunicorn imports the app object directly, so this block only runs when
 # executing `python app.py` (development). In production Gunicorn handles
 # the WSGI server and the if-block is skipped.
+# Deployed via GitHub Actions CI/CD pipeline.
 # =============================================================================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
