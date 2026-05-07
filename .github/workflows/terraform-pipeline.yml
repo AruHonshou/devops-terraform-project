@@ -1,0 +1,170 @@
+# =============================================================================
+# TERRAFORM CI/CD PIPELINE
+# =============================================================================
+# Triggers on any push or PR that touches files inside the terraform/ directory.
+#
+# Flow:
+#   1. Checkout → 2. Setup Terraform → 3. AWS Creds → 4. fmt -check
+#   5. terraform init → 6. terraform validate → 7. terraform plan
+#   8. (PR) Post plan as comment → 9. (main push) terraform apply
+#
+# The plan comment on PRs lets reviewers see exactly what will change
+# BEFORE merging — the core benefit of Infrastructure-as-Code in a team.
+# =============================================================================
+
+name: Terraform CI/CD
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform-pipeline.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform-pipeline.yml"
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  TF_WORKING_DIR: terraform
+
+# Permissions needed to post PR comments
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+
+    steps:
+      # =======================================================================
+      # Step 1 — Checkout
+      # =======================================================================
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # =======================================================================
+      # Step 2 — Install Terraform
+      # =======================================================================
+      # Pins the version to match what we use locally.
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.5"
+
+      # =======================================================================
+      # Step 3 — Configure AWS credentials
+      # =======================================================================
+      # Uses GitHub Secrets — Access Key + Secret Key are NEVER echoed.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # =======================================================================
+      # Step 4 — Format check
+      # =======================================================================
+      # If any .tf file is not properly formatted, the pipeline fails.
+      # Run `terraform fmt -recursive` locally to fix.
+      - name: Terraform fmt
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform fmt -check -recursive
+
+      # =======================================================================
+      # Step 5 — Initialize
+      # =======================================================================
+      # Downloads providers and configures the S3 backend.
+      - name: Terraform init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -no-color
+
+      # =======================================================================
+      # Step 6 — Validate
+      # =======================================================================
+      # Catches syntax errors and invalid references before plan.
+      - name: Terraform validate
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform validate -no-color
+
+      # =======================================================================
+      # Step 7 — Plan
+      # =======================================================================
+      # Shows what Terraform would create/change/destroy. The output is saved
+      # to a file so it can be posted as a PR comment.
+      - name: Terraform plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        env:
+          # Provide variables that are normally in terraform.tfvars (gitignored)
+          TF_VAR_project_name: "devops-terraform-api"
+          TF_VAR_environment: "portfolio"
+          TF_VAR_allowed_ssh_cidr: ${{ secrets.SSH_ALLOWED_CIDR }}
+        run: |
+          terraform plan -no-color -input=false \
+            -out=tfplan 2>&1 | tee tfplan.txt
+
+      # =======================================================================
+      # Step 8 — Post plan as PR comment
+      # =======================================================================
+      # Only runs on pull_request events. Uses the built-in GITHUB_TOKEN
+      # to post a comment showing the full plan output.
+      - name: Post plan to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('${{ env.TF_WORKING_DIR }}/tfplan.txt', 'utf8');
+            const truncated = plan.length > 60000
+              ? plan.substring(0, 60000) + '\n\n```\n\n> ⚠️ Output truncated (too long)'
+              : plan;
+
+            const body = `### 🌍 Terraform Plan\n\n<details><summary>Click to expand</summary>\n\n\`\`\`hcl\n${truncated}\n\`\`\`\n\n</details>`;
+
+            // Update existing bot comment or create a new one
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('Terraform Plan')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      # =======================================================================
+      # Step 9 — Apply (push to main ONLY)
+      # =======================================================================
+      # Applies the plan to AWS. This only runs on direct pushes to main,
+      # never on pull requests. Uses auto-approve since the plan was already
+      # reviewed in the PR.
+      - name: Terraform apply
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        env:
+          TF_VAR_project_name: "devops-terraform-api"
+          TF_VAR_environment: "portfolio"
+          TF_VAR_allowed_ssh_cidr: ${{ secrets.SSH_ALLOWED_CIDR }}
+        run: terraform apply -auto-approve -input=false tfplan

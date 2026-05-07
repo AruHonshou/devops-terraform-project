@@ -1,0 +1,1 @@
+# Allows `from app import app` to work from the repository root via CI
